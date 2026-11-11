@@ -51,9 +51,14 @@ if st.session_state.memory is None:
 
 
 def get_llm(mode: str, provider: str, api_key: str | None):
-    """Build the LLM based on sidebar settings."""
+    """Build the LLM based on sidebar settings. Falls back to Mock if no key."""
     if mode == "Live LLM (Gemini / OpenAI)":
-        return RealLLM(api_key=api_key or None, provider=provider)
+        if not api_key:
+            raise ValueError(
+                "No API key provided. Please enter your Gemini/OpenAI key in the sidebar, "
+                "or switch to **Mock Mode** (free, no key needed)."
+            )
+        return RealLLM(api_key=api_key, provider=provider)
     return build_mock_llm(st.session_state.goal)
 
 
@@ -61,25 +66,36 @@ def get_llm(mode: str, provider: str, api_key: str | None):
 with st.sidebar:
     st.header("⚙️ Agent Controls")
 
+    # Try to auto-detect a key from Streamlit secrets
+    _secret_gemini = None
+    _secret_openai = None
+    try:
+        _secret_gemini = st.secrets.get("GEMINI_API_KEY", None) or None
+        _secret_openai = st.secrets.get("OPENAI_API_KEY", None) or None
+    except Exception:
+        pass
+
+    _has_secret = bool(_secret_gemini or _secret_openai)
+
+    # Default to Mock Mode unless a secret key is already configured
+    _default_index = 0 if _has_secret else 1
+
     mode = st.radio(
         "LLM Engine:",
         ["Live LLM (Gemini / OpenAI)", "Mock Mode (Free, Instant)"],
-        index=0,  # Default to Live LLM now
+        index=_default_index,
     )
 
     api_key = None
     provider = "auto"
     if mode == "Live LLM (Gemini / OpenAI)":
         provider = st.selectbox("Provider:", ["gemini", "openai", "auto"])
-        # Try Streamlit secrets first, then let user enter manually
-        secret_key = None
-        try:
-            if provider in ("gemini", "auto"):
-                secret_key = st.secrets.get("GEMINI_API_KEY", None)
-            elif provider == "openai":
-                secret_key = st.secrets.get("OPENAI_API_KEY", None)
-        except Exception:
-            pass
+
+        # Pick the matching secret
+        if provider in ("gemini", "auto"):
+            secret_key = _secret_gemini
+        else:
+            secret_key = _secret_openai
 
         if secret_key:
             api_key = secret_key
@@ -92,10 +108,12 @@ with st.sidebar:
                 help="Get a free Gemini key at https://aistudio.google.com/app/apikey",
             )
             if not api_key:
-                st.info(
-                    "🔑 Enter a Gemini API key above, or switch to **Mock Mode** to try without one.\n\n"
-                    "[Get a free Gemini key →](https://aistudio.google.com/app/apikey)"
+                st.warning(
+                    "⚠️ No API key found. Enter one above **or switch to Mock Mode** (free, no key needed).\n\n"
+                    "👉 [Get a free Gemini key](https://aistudio.google.com/app/apikey)"
                 )
+    else:
+        st.success("✅ Mock Mode active — no API key required.")
 
     st.divider()
 
