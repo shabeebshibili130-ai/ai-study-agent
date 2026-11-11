@@ -1,0 +1,19 @@
+{
+  "progress": {},
+  "weak_spots": [],
+  "preferences": {
+    "default_quiz_length": 5
+  },
+  "past_tasks": [
+    {
+      "date": "2026-11-11T05:45:03.479230+00:00",
+      "goal": "Help me revise photosynthesis for Friday",
+      "summary": "Unable to reach LLM provider (HTTP Error 400: Bad Request). Please check network and API key."
+    },
+    {
+      "date": "2026-11-11T05:46:09.900052+00:00",
+      "goal": "Create a 5-question quiz on photosynthesis",
+      "summary": "Unable to reach LLM provider (HTTP Error 400: Bad Request). Please check network and API key."
+    }
+  ]
+}

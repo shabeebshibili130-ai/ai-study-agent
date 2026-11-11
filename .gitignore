@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments & secrets
+.env
+.venv/
+env/
+venv/
+
+# Pytest & testing caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & agent outputs (user study files)
+logs/*.jsonl
+!logs/.gitkeep
+output/*
+!output/.gitkeep
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
