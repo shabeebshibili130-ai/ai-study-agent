@@ -1,8 +1,30 @@
 # AI Study Agent 🎓
 
-A minimalist, goal-driven command-line study assistant demonstrating the core foundations of AI agents: **Think → Act → Look**, planning before acting, persistent memory, sandboxing, and safety controls.
+A minimalist, goal-driven study assistant demonstrating the core foundations of AI agents: **Think → Act → Look**, planning before acting, persistent memory, sandboxing, and safety controls.
 
 Built with pure Python (no heavyweight agent frameworks) across 8 core lessons (L1–L8).
+
+[![Live Web App](https://img.shields.io/badge/Live%20Web%20App-Streamlit-FF4B4B?style=for-the-badge&logo=streamlit)](https://ai-study-agent-xjqgdlcbihtbcg7vxkklk2.streamlit.app/)
+[![PyPI version](https://img.shields.io/pypi/v/ai-study-agent.svg?style=for-the-badge&color=blue)](https://pypi.org/project/ai-study-agent/1.0.0/)
+[![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?style=for-the-badge&logo=github)](https://github.com/shabeebshibili130-ai/ai-study-agent)
+
+---
+
+## 🌐 Try It Live
+You can test the agent right now in your web browser with zero setup:
+👉 **[https://ai-study-agent-xjqgdlcbihtbcg7vxkklk2.streamlit.app/](https://ai-study-agent-xjqgdlcbihtbcg7vxkklk2.streamlit.app/)**
+
+---
+
+## 📦 Install from PyPI
+Install globally via pip:
+```bash
+pip install ai-study-agent
+```
+And run anywhere:
+```bash
+study-agent "Help me revise photosynthesis for Friday"
+```
 
 ---
 
