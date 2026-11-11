@@ -9,6 +9,9 @@ __pycache__/
 env/
 venv/
 
+# Streamlit secrets (never commit)
+.streamlit/secrets.toml
+
 # Pytest & testing caches
 .pytest_cache/
 .coverage

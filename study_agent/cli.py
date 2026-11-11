@@ -51,7 +51,13 @@ def format_step_for_terminal(step_record: Dict[str, Any]) -> str:
 def build_mock_llm(goal: str) -> BaseLLM:
     """Constructs a realistic FakeLLM script for demo and mock runs."""
     goal_lower = goal.lower()
-    topic = "photosynthesis" if "photosynthesis" in goal_lower else "mitochondria" if "mitochondria" in goal_lower else "notes"
+    # Bug 7 fix: fall back to "photosynthesis" (a file that exists) instead of "notes"
+    if "photosynthesis" in goal_lower:
+        topic = "photosynthesis"
+    elif "mitochondria" in goal_lower or "respiration" in goal_lower:
+        topic = "mitochondria"
+    else:
+        topic = "photosynthesis"   # safe default — file always exists in notes/
     filename = f"{topic}.md"
 
     responses = [
