@@ -226,6 +226,36 @@ def _call_gemini(messages: list[dict], api_key: str) -> str:
         return _gemini_http(messages, api_key, model)
 
 
+def _call_groq(messages: list[dict], api_key: str, model: str = "llama-3.3-70b-versatile") -> str:
+    """Call Groq API (ultra-fast, free, behaves like GPT-4o)."""
+    full = [{"role": "system", "content": _build_system_prompt()}] + messages
+    try:
+        from openai import OpenAI  # type: ignore
+        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        response = client.chat.completions.create(
+            model=model, messages=full, temperature=0.7, max_tokens=2048
+        )
+        return response.choices[0].message.content
+    except Exception:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        payload = {"model": model, "messages": full, "temperature": 0.7, "max_tokens": 2048}
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        choices = body.get("choices", [])
+        if choices:
+            return choices[0].get("message", {}).get("content", "")
+        return "No response from Groq."
+
+
 def _openai_sdk(messages: list[dict], api_key: str, model: str) -> str:
     """Call OpenAI via openai SDK (preferred)."""
     from openai import OpenAI  # type: ignore
@@ -346,6 +376,8 @@ def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | 
     try:
         if provider == "openai":
             reply = _call_openai(messages, api_key.strip())
+        elif provider == "groq":
+            reply = _call_groq(messages, api_key.strip())
         else:  # "gemini" or "auto"
             reply = _call_gemini(messages, api_key.strip())
 
@@ -356,13 +388,24 @@ def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | 
 
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        # API_KEY_INVALID or quota issues → show a helpful banner and use mock
         if e.code in (400, 401, 403):
             st.error(
-                f"**API key error ({e.code}):** The key you entered is not valid or has no access to Gemini.\n\n"
-                "👉 Get a free valid key → [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)\n\n"
-                "Falling back to **Mock Mode** for now.",
+                f"**API key error ({e.code}):** The key was rejected by the provider.\n\n"
+                "👉 Double check that your key is active and correctly pasted.",
                 icon="🔑",
+            )
+        elif e.code == 404 and provider == "gemini":
+            st.error(
+                "### ⚠️ Gemini API Disabled for this Project\n\n"
+                "Google returned a `404` error because your API key was created inside an **imported Google Cloud project** (`Gemini Project`) where the **Generative Language API is not enabled**.\n\n"
+                "#### ✅ How to fix in 10 seconds:\n"
+                "1. Open [Google AI Studio API Keys](https://aistudio.google.com/app/apikey)\n"
+                "2. Click **Create API key**\n"
+                "3. Select **'Create API key in new project'** *(do NOT select 'Gemini Project')*\n"
+                "4. Copy that new key and paste it here!\n\n"
+                "*(Or enable the API in your current project: [Enable Generative Language API](https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com))*\n\n"
+                "💡 *Tip: You can also choose **Groq (Free LLaMA 3.3)** in the sidebar dropdown for free, instant ChatGPT-style performance.*",
+                icon="🚨",
             )
         else:
             st.error(f"**API error {e.code}** — falling back to Mock Mode.", icon="⚠️")
@@ -370,12 +413,24 @@ def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | 
 
     except Exception as e:
         err = str(e)
-        if "API_KEY_INVALID" in err or "api key" in err.lower():
+        if "API_KEY_INVALID" in err:
             st.error(
-                "**Invalid API key.** The key you entered was rejected by Google.\n\n"
-                "👉 [Get a free valid Gemini key](https://aistudio.google.com/app/apikey) · "
-                "Falling back to **Mock Mode**.",
+                "**Invalid API key.** The key you entered was rejected by the provider.\n\n"
+                "Please verify your key in the sidebar.",
                 icon="🔑",
+            )
+        elif "404" in err and provider == "gemini":
+            st.error(
+                "### ⚠️ Generative Language API Not Enabled on Google Cloud\n\n"
+                "Google returned `404 Not Found` because the **Generative Language API** is not enabled in your selected Google Cloud project (`Gemini Project`).\n\n"
+                "#### ✅ Easy 10-Second Fix:\n"
+                "1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey)\n"
+                "2. Click **Create API key**\n"
+                "3. Choose **'Create API key in new project'** (AI Studio will enable everything automatically)\n"
+                "4. Copy the new key and paste it in the sidebar!\n\n"
+                "*(Or click here to enable it in your existing project: [Enable Generative Language API](https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com))*\n\n"
+                "🚀 *Alternative: Switch Provider to **Groq (Free LLaMA 3.3)** in the sidebar — get a free key from [console.groq.com](https://console.groq.com) in 10 seconds!*",
+                icon="🚨",
             )
         else:
             st.error(f"**Unexpected error** — falling back to Mock Mode.\n\n`{err[:200]}`", icon="⚠️")
@@ -398,41 +453,71 @@ with st.sidebar:
     st.header("⚙️ Agent Controls")
 
     # Auto-detect secrets so we default to Live if a key is already configured
-    _secret_gemini, _secret_openai = None, None
+    _secret_gemini, _secret_openai, _secret_groq = None, None, None
     try:
         _secret_gemini = st.secrets.get("GEMINI_API_KEY") or None
         _secret_openai = st.secrets.get("OPENAI_API_KEY") or None
+        _secret_groq = st.secrets.get("GROQ_API_KEY") or None
     except Exception:
         pass
-    _has_secret = bool(_secret_gemini or _secret_openai)
+    _has_secret = bool(_secret_gemini or _secret_openai or _secret_groq)
 
     mode = st.radio(
         "LLM Engine:",
-        ["Mock Mode (Free, Instant)", "Live LLM (Gemini / OpenAI)"],
+        ["Mock Mode (Free, Instant)", "Live LLM (Gemini / Groq / OpenAI)"],
         index=0 if not _has_secret else 1,
     )
 
     api_key: str | None = None
     provider = "gemini"
 
-    if mode == "Live LLM (Gemini / OpenAI)":
-        provider = st.selectbox("Provider:", ["gemini", "openai"])
-        secret_key = _secret_gemini if provider == "gemini" else _secret_openai
+    if mode == "Live LLM (Gemini / Groq / OpenAI)":
+        provider = st.selectbox(
+            "Provider:",
+            ["gemini", "groq", "openai"],
+            format_func=lambda x: {
+                "gemini": "Google Gemini (Flash)",
+                "groq": "Groq (Free LLaMA 3.3 - Like GPT)",
+                "openai": "OpenAI (GPT-4o-mini)",
+            }.get(x, x),
+        )
+
+        secret_map = {
+            "gemini": _secret_gemini,
+            "groq": _secret_groq,
+            "openai": _secret_openai,
+        }
+        secret_key = secret_map.get(provider)
 
         if secret_key:
             api_key = secret_key
             st.success("🔑 API key loaded from Streamlit secrets.")
         else:
+            placeholders = {
+                "gemini": "AIza… (Google Gemini Key)",
+                "groq": "gsk_… (Groq Free Key)",
+                "openai": "sk-… (OpenAI Key)",
+            }
+            help_links = {
+                "gemini": "Get a key → https://aistudio.google.com/app/apikey (choose 'new project')",
+                "groq": "Get free instant key → https://console.groq.com/keys",
+                "openai": "Get OpenAI key → https://platform.openai.com/api-keys",
+            }
             api_key = st.text_input(
                 "Paste your API Key:",
                 type="password",
-                placeholder="AIza… (Gemini)  or  sk-… (OpenAI)",
-                help="Get a free Gemini key → https://aistudio.google.com/app/apikey",
+                placeholder=placeholders.get(provider, "Paste key here"),
+                help=help_links.get(provider, ""),
             )
             if not api_key:
+                links_md = {
+                    "gemini": "[Get a free Gemini key](https://aistudio.google.com/app/apikey) *(select 'new project')*",
+                    "groq": "[Get a free Groq key](https://console.groq.com/keys) *(free, 300+ tokens/sec, like GPT)*",
+                    "openai": "[Get an OpenAI key](https://platform.openai.com/api-keys)",
+                }
                 st.info(
-                    "Enter an API key above **or switch to Mock Mode** (free, no key needed).\n\n"
-                    "👉 [Get a free Gemini key](https://aistudio.google.com/app/apikey)"
+                    f"Enter your {provider.capitalize()} API key above or switch to **Mock Mode**.\n\n"
+                    f"👉 {links_md.get(provider, '')}"
                 )
     else:
         st.success("✅ Mock Mode — no API key required.")
