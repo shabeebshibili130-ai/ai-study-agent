@@ -468,9 +468,14 @@ with st.sidebar:
 
     # ── Chat controls ─────────────────────────────────────────────────────────
     st.header("💬 Chat Controls")
+    if mode == "Live LLM (Gemini / OpenAI)" and provider == "gemini":
+        active_m = st.session_state.get("active_gemini_model", "gemini-2.0-flash")
+        st.caption(f"🤖 Connected Model: `{active_m}`")
+
     if st.button("🔄 Clear Conversation", use_container_width=True):
         st.session_state.messages = []
         st.session_state.pending_prompt = None
+        st.session_state.active_gemini_model = None
         st.rerun()
 
     st.divider()
