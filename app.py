@@ -1,24 +1,25 @@
-"""Streamlit Web Application for the AI Study Agent."""
+"""
+AI Study Agent — Dynamic Conversational Chat Interface
+Full live LLM integration (Gemini / OpenAI) with multi-turn memory.
+"""
 
 from pathlib import Path
+import json
+import urllib.error
+import urllib.request
+
 import streamlit as st
 
-from study_agent.agent import run_agent
-from study_agent.cli import build_mock_llm
-from study_agent.llm import RealLLM
-from study_agent.logger import AgentLogger
 from study_agent.memory import (
     DEFAULT_MEMORY_FILE,
     format_memory_for_prompt,
     get_empty_memory,
     load_memory,
+    record_progress,
     reset_memory,
-    save_memory,
 )
-from study_agent.planner import Plan, generate_plan
-from study_agent.tools import TOOLS
 
-# ── Page Configuration ──────────────────────────────────────────────────────
+# ── Page config (must be first Streamlit call) ───────────────────────────────
 st.set_page_config(
     page_title="AI Study Agent",
     page_icon="🎓",
@@ -26,98 +27,300 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Initialize Session State (always first, before any widgets) ──────────────
-if "plan" not in st.session_state:
-    st.session_state.plan = None
-if "goal" not in st.session_state:
-    st.session_state.goal = ""
-if "run_result" not in st.session_state:
-    st.session_state.run_result = None
-if "quiz_content" not in st.session_state:
-    st.session_state.quiz_content = None          # Bug 4 fix: store quiz in state
-if "quiz_filename" not in st.session_state:
-    st.session_state.quiz_filename = None
-if "memory" not in st.session_state:              # Bug 5 fix: memory in session state
-    st.session_state.memory = None
-if "logger_path" not in st.session_state:         # Bug 2 fix: store log path in state
-    st.session_state.logger_path = None
-if "steps_log" not in st.session_state:
-    st.session_state.steps_log = []
+# ── System prompt ─────────────────────────────────────────────────────────────
+_SYSTEM_PROMPT_TEMPLATE = """\
+You are an expert AI Study Agent — an autonomous, adaptive, goal-driven study assistant.
 
-# Load or init memory once per session
-if st.session_state.memory is None:
+Your capabilities:
+- Break down complex topics into clear, digestible explanations tailored to the student's level.
+- Create adaptive quizzes (multiple-choice, short-answer, true/false) and give instant feedback.
+- Track what the student has covered so far and what they are struggling with.
+- Provide hints, worked examples, and step-by-step explanations when asked.
+- Celebrate progress and keep the student motivated.
+- Summarise key concepts at the end of a session when requested.
+
+Available Study Notes (use these as your primary source of truth):
+{notes_context}
+
+Student Memory & Progress:
+{memory_context}
+
+Behaviour rules:
+- Be conversational, encouraging, and clear.
+- Use markdown formatting (headers, bold key terms, bullet lists, code blocks for equations).
+- After answering, ask a follow-up question to check understanding.
+- When the student gets a quiz question wrong, explain the correct answer and offer another question.
+- Adapt difficulty based on how the student is responding.
+- Never invent facts beyond the notes provided; say so if the question is out of scope.
+"""
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def _load_all_notes() -> str:
+    notes_dir = Path("notes")
+    if not notes_dir.exists():
+        return "No study notes found."
+    sections = []
+    for f in sorted(notes_dir.glob("*.md")):
+        sections.append(f"### {f.stem.capitalize()}\n{f.read_text(encoding='utf-8')}")
+    return "\n\n".join(sections) if sections else "No study notes found."
+
+
+def _build_system_prompt() -> str:
+    mem = st.session_state.get("memory", get_empty_memory())
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        notes_context=_load_all_notes(),
+        memory_context=format_memory_for_prompt(mem),
+    )
+
+
+# ── LLM backends ─────────────────────────────────────────────────────────────
+def _gemini_sdk(messages: list[dict], api_key: str, model: str) -> str:
+    """Call Gemini via google-generativeai SDK (preferred)."""
+    import google.generativeai as genai  # type: ignore
+
+    genai.configure(api_key=api_key)
+    gmodel = genai.GenerativeModel(
+        model_name=model,
+        system_instruction=_build_system_prompt(),
+    )
+
+    # Convert to Gemini history format (all but last message)
+    history = [
+        {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
+        for m in messages[:-1]
+    ]
+    chat = gmodel.start_chat(history=history)
+    response = chat.send_message(messages[-1]["content"])
+    return response.text
+
+
+def _gemini_http(messages: list[dict], api_key: str, model: str) -> str:
+    """Call Gemini via raw HTTP (fallback when SDK not installed)."""
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent?key={api_key}"
+    )
+    contents = [
+        {
+            "role": "user" if m["role"] == "user" else "model",
+            "parts": [{"text": m["content"]}],
+        }
+        for m in messages
+    ]
+    payload = {
+        "contents": contents,
+        "systemInstruction": {"parts": [{"text": _build_system_prompt()}]},
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048},
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    candidates = body.get("candidates", [])
+    if candidates:
+        parts = candidates[0].get("content", {}).get("parts", [])
+        if parts:
+            return parts[0].get("text", "")
+    return "No response from Gemini."
+
+
+def _call_gemini(messages: list[dict], api_key: str, model: str = "gemini-1.5-flash") -> str:
+    try:
+        return _gemini_sdk(messages, api_key, model)
+    except ImportError:
+        return _gemini_http(messages, api_key, model)
+
+
+def _openai_sdk(messages: list[dict], api_key: str, model: str) -> str:
+    """Call OpenAI via openai SDK (preferred)."""
+    from openai import OpenAI  # type: ignore
+
+    client = OpenAI(api_key=api_key)
+    full = [{"role": "system", "content": _build_system_prompt()}] + messages
+    response = client.chat.completions.create(
+        model=model, messages=full, temperature=0.7, max_tokens=2048
+    )
+    return response.choices[0].message.content
+
+
+def _openai_http(messages: list[dict], api_key: str, model: str) -> str:
+    """Call OpenAI via raw HTTP (fallback when SDK not installed)."""
+    url = "https://api.openai.com/v1/chat/completions"
+    full = [{"role": "system", "content": _build_system_prompt()}] + messages
+    payload = {"model": model, "messages": full, "temperature": 0.7, "max_tokens": 2048}
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    choices = body.get("choices", [])
+    if choices:
+        return choices[0].get("message", {}).get("content", "")
+    return "No response from OpenAI."
+
+
+def _call_openai(messages: list[dict], api_key: str, model: str = "gpt-4o-mini") -> str:
+    try:
+        return _openai_sdk(messages, api_key, model)
+    except ImportError:
+        return _openai_http(messages, api_key, model)
+
+
+def _mock_response(user_message: str) -> str:
+    """Deterministic fallback when no API key is available."""
+    msg = user_message.lower()
+    if any(w in msg for w in ["photosynthesis", "light reaction", "calvin", "rubisco"]):
+        return (
+            "Great question! 🌱 Let me break down **Photosynthesis** for you.\n\n"
+            "**Core equation:**\n"
+            "> 6CO₂ + 6H₂O + light → C₆H₁₂O₆ + 6O₂\n\n"
+            "**Two stages:**\n"
+            "1. **Light-Dependent Reactions** (thylakoid membranes)\n"
+            "   - Splits water (photolysis) → releases O₂\n"
+            "   - Produces ATP and NADPH\n"
+            "2. **Calvin Cycle** (stroma)\n"
+            "   - Uses ATP + NADPH to fix CO₂ → glucose\n"
+            "   - Key enzyme: **RuBisCO**\n\n"
+            "💡 **Quick check:** What two products of the light-dependent reactions "
+            "are used in the Calvin Cycle?"
+        )
+    if any(w in msg for w in ["mitochondria", "atp", "respiration", "krebs", "glycolysis"]):
+        return (
+            "⚡ Let's explore **Mitochondria & Cellular Respiration**!\n\n"
+            "Mitochondria are the **powerhouse of the cell** — they produce ATP.\n\n"
+            "**Three stages:**\n"
+            "1. **Glycolysis** → cytoplasm → 2 ATP\n"
+            "2. **Krebs Cycle** → mitochondrial matrix → electron carriers\n"
+            "3. **Oxidative Phosphorylation (ETC)** → inner membrane → ~34 ATP\n\n"
+            "💡 **Quick check:** Where exactly does glycolysis occur — inside or "
+            "outside the mitochondrion?"
+        )
+    if any(w in msg for w in ["quiz", "test me", "question"]):
+        return (
+            "🎯 Let's test your knowledge!\n\n"
+            "**Question 1:** Which enzyme is responsible for fixing CO₂ in the Calvin Cycle?\n"
+            "- A) ATP Synthase\n"
+            "- B) **RuBisCO** ✅\n"
+            "- C) Helicase\n"
+            "- D) Amylase\n\n"
+            "**Question 2:** Glycolysis produces how many net ATP molecules per glucose?\n"
+            "- A) 36\n"
+            "- B) 4\n"
+            "- C) **2** ✅\n"
+            "- D) 0\n\n"
+            "Reply with your answers or say **'next question'** for more! 🚀"
+        )
+    return (
+        "👋 Hi! I'm your **AI Study Agent** running in **Mock Mode** (no API key needed).\n\n"
+        "I can help you:\n"
+        "- 📖 **Explain topics** — ask about photosynthesis, mitochondria, cell biology…\n"
+        "- 🎯 **Quiz you** — say *'quiz me on photosynthesis'*\n"
+        "- 📊 **Track progress** — I remember what we've covered this session\n\n"
+        "To unlock full AI responses, add your **Gemini** or **OpenAI** API key in the sidebar "
+        "and switch to **Live LLM** mode.\n\n"
+        "What would you like to study today?"
+    )
+
+
+def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | None) -> str:
+    """Route the user message to the right backend and return the reply."""
+    if mode == "Mock Mode (Free, Instant)":
+        return _mock_response(user_message)
+
+    if not api_key or not api_key.strip():
+        return (
+            "❌ **No API key provided.**\n\n"
+            "Please paste your API key in the sidebar, or switch to **Mock Mode** to try "
+            "the agent for free without any key."
+        )
+
+    # Build the full conversation for the API call
+    messages = [
+        {"role": m["role"], "content": m["content"]}
+        for m in st.session_state.messages
+    ]
+
+    try:
+        if provider == "openai":
+            return _call_openai(messages, api_key.strip())
+        else:  # "gemini" or "auto"
+            return _call_gemini(messages, api_key.strip())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        return f"❌ **API error {e.code}:** {body[:300]}"
+    except Exception as e:
+        return f"❌ **Unexpected error:** {str(e)}"
+
+
+# ── Session-state bootstrap ───────────────────────────────────────────────────
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "memory" not in st.session_state:
     mem, _ = load_memory(DEFAULT_MEMORY_FILE)
     st.session_state.memory = mem
+if "pending_prompt" not in st.session_state:
+    # Set by quick-start buttons; consumed on the next render cycle
+    st.session_state.pending_prompt = None
 
 
-def get_llm(mode: str, provider: str, api_key: str | None):
-    """Build the LLM based on sidebar settings. Falls back to Mock if no key."""
-    if mode == "Live LLM (Gemini / OpenAI)":
-        if not api_key:
-            raise ValueError(
-                "No API key provided. Please enter your Gemini/OpenAI key in the sidebar, "
-                "or switch to **Mock Mode** (free, no key needed)."
-            )
-        return RealLLM(api_key=api_key, provider=provider)
-    return build_mock_llm(st.session_state.goal)
-
-
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Agent Controls")
 
-    # Try to auto-detect a key from Streamlit secrets
-    _secret_gemini = None
-    _secret_openai = None
+    # Auto-detect secrets so we default to Live if a key is already configured
+    _secret_gemini, _secret_openai = None, None
     try:
-        _secret_gemini = st.secrets.get("GEMINI_API_KEY", None) or None
-        _secret_openai = st.secrets.get("OPENAI_API_KEY", None) or None
+        _secret_gemini = st.secrets.get("GEMINI_API_KEY") or None
+        _secret_openai = st.secrets.get("OPENAI_API_KEY") or None
     except Exception:
         pass
-
     _has_secret = bool(_secret_gemini or _secret_openai)
-
-    # Default to Mock Mode unless a secret key is already configured
-    _default_index = 0 if _has_secret else 1
 
     mode = st.radio(
         "LLM Engine:",
         ["Live LLM (Gemini / OpenAI)", "Mock Mode (Free, Instant)"],
-        index=_default_index,
+        index=0 if _has_secret else 1,
     )
 
-    api_key = None
-    provider = "auto"
-    if mode == "Live LLM (Gemini / OpenAI)":
-        provider = st.selectbox("Provider:", ["gemini", "openai", "auto"])
+    api_key: str | None = None
+    provider = "gemini"
 
-        # Pick the matching secret
-        if provider in ("gemini", "auto"):
-            secret_key = _secret_gemini
-        else:
-            secret_key = _secret_openai
+    if mode == "Live LLM (Gemini / OpenAI)":
+        provider = st.selectbox("Provider:", ["gemini", "openai"])
+        secret_key = _secret_gemini if provider == "gemini" else _secret_openai
 
         if secret_key:
             api_key = secret_key
-            st.success("✅ API key loaded from Streamlit secrets.", icon="🔑")
+            st.success("🔑 API key loaded from Streamlit secrets.")
         else:
             api_key = st.text_input(
-                "Paste your API Key here:",
+                "Paste your API Key:",
                 type="password",
-                placeholder="AIza... (Gemini) or sk-... (OpenAI)",
-                help="Get a free Gemini key at https://aistudio.google.com/app/apikey",
+                placeholder="AIza… (Gemini)  or  sk-… (OpenAI)",
+                help="Get a free Gemini key → https://aistudio.google.com/app/apikey",
             )
             if not api_key:
-                st.warning(
-                    "⚠️ No API key found. Enter one above **or switch to Mock Mode** (free, no key needed).\n\n"
+                st.info(
+                    "Enter an API key above **or switch to Mock Mode** (free, no key needed).\n\n"
                     "👉 [Get a free Gemini key](https://aistudio.google.com/app/apikey)"
                 )
     else:
-        st.success("✅ Mock Mode active — no API key required.")
+        st.success("✅ Mock Mode — no API key required.")
 
     st.divider()
 
-    # Bug 5 fix: use session-state memory, not disk
+    # ── Student Memory ────────────────────────────────────────────────────────
     st.header("🧠 Student Memory")
     mem = st.session_state.memory
     weak_spots = mem.get("weak_spots", [])
@@ -133,252 +336,125 @@ with st.sidebar:
         st.markdown("**Topic Progress:**")
         for topic, data in progress.items():
             score = data.get("score", 0)
-            bar_color = "🟢" if score >= 0.8 else "🟡" if score >= 0.5 else "🔴"
-            st.markdown(f"- {bar_color} **{topic}**: {score:.0%}")
+            icon = "🟢" if score >= 0.8 else "🟡" if score >= 0.5 else "🔴"
+            st.markdown(f"- {icon} **{topic}**: {score:.0%}")
 
     if st.button("🗑️ Reset Memory", use_container_width=True):
         st.session_state.memory = get_empty_memory()
         reset_memory(DEFAULT_MEMORY_FILE)
-        st.toast("Memory reset successfully!")
+        st.toast("Memory reset!")
         st.rerun()
 
     st.divider()
-    st.header("📁 Available Study Notes")
+
+    # ── Chat controls ─────────────────────────────────────────────────────────
+    st.header("💬 Chat Controls")
+    if st.button("🔄 Clear Conversation", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.pending_prompt = None
+        st.rerun()
+
+    st.divider()
+
+    # ── Available Notes ───────────────────────────────────────────────────────
+    st.header("📁 Study Notes")
     notes_dir = Path("notes")
     if notes_dir.exists():
-        notes_files = [p.name for p in notes_dir.glob("*.md")]
-        if notes_files:
-            selected_note = st.selectbox("Inspect Note:", notes_files)
-            if selected_note:
-                note_content = (notes_dir / selected_note).read_text(encoding="utf-8")
-                with st.expander(f"📄 View {selected_note}"):
-                    st.markdown(note_content)
+        note_files = [p.name for p in notes_dir.glob("*.md")]
+        if note_files:
+            sel = st.selectbox("Inspect note:", note_files)
+            if sel:
+                with st.expander(f"📄 {sel}"):
+                    st.markdown((notes_dir / sel).read_text(encoding="utf-8"))
         else:
             st.caption("No notes files found.")
     else:
-        st.caption("⚠️ `notes/` folder not found in working directory.")
+        st.caption("⚠️ `notes/` folder not present.")
 
 
-# ── Main Header (always visible — Bug 1 fix) ─────────────────────────────────
+# ── Main area ─────────────────────────────────────────────────────────────────
 st.title("🎓 AI Study Agent")
-st.markdown(
-    "**Autonomous, goal-driven study assistant** with planning, tool sandboxing, and persistent memory."
-)
+st.caption("Autonomous, goal-driven study assistant · Powered by Gemini or OpenAI")
+
+# ── Quick-start buttons ───────────────────────────────────────────────────────
+qc1, qc2, qc3, qc4 = st.columns(4)
+_quick_prompts = {
+    "🌱 Revise Photosynthesis":    "Help me revise photosynthesis. Start with the key concepts and then quiz me.",
+    "⚡ Revise Mitochondria":      "Help me revise mitochondria and cellular respiration. Give me a summary then quiz me.",
+    "📝 Quiz on Cell Biology":     "Quiz me on cell biology topics including photosynthesis and mitochondria.",
+    "📊 Show My Progress":         "Show me what I've studied so far and what my weak spots are.",
+}
+_btns = list(_quick_prompts.items())
+for col, (label, prompt) in zip([qc1, qc2, qc3, qc4], _btns):
+    with col:
+        if st.button(label, use_container_width=True):
+            st.session_state.pending_prompt = prompt
+            st.rerun()
+
 st.divider()
 
-# ── Quick Goal Buttons ────────────────────────────────────────────────────────
-col_g1, col_g2, col_g3 = st.columns(3)
-with col_g1:
-    if st.button("🌱 Revise Photosynthesis", use_container_width=True):
-        st.session_state.goal = "Help me revise photosynthesis for Friday"
-        st.session_state.plan = None
-        st.session_state.run_result = None
-        st.rerun()
-with col_g2:
-    if st.button("⚡ Revise Mitochondria", use_container_width=True):
-        st.session_state.goal = "Help me revise mitochondria for Friday"
-        st.session_state.plan = None
-        st.session_state.run_result = None
-        st.rerun()
-with col_g3:
-    # Bug 6 fix: label and goal now match
-    if st.button("📝 Quiz Me on Cell Biology", use_container_width=True):
-        st.session_state.goal = "Create a 5-question quiz on cell biology topics including photosynthesis and mitochondria"
-        st.session_state.plan = None
-        st.session_state.run_result = None
-        st.rerun()
-
-goal_input = st.text_input(
-    "What is your study goal?",
-    value=st.session_state.goal,
-    placeholder="e.g. Help me revise photosynthesis for Friday",
-)
-
-col_act1, col_act2 = st.columns([1, 4])
-with col_act1:
-    generate_clicked = st.button("🎯 Formulate Plan", type="primary", use_container_width=True)
-
-# Bug 8 fix: show warning if Formulate Plan clicked with empty goal
-if generate_clicked:
-    if not goal_input.strip():
-        st.warning("⚠️ Please enter a study goal first (e.g. 'Help me revise photosynthesis for Friday').")
-    else:
-        st.session_state.goal = goal_input.strip()
-        st.session_state.run_result = None
-        st.session_state.quiz_content = None
-        st.session_state.steps_log = []
-        mem = st.session_state.memory
-        memory_summary = format_memory_for_prompt(mem)
-
-        # Build LLM — with graceful error for missing key
-        try:
-            llm = get_llm(mode, provider, api_key)
-        except Exception as e:
-            st.error(f"❌ Could not start LLM: {e}\n\nPlease enter a valid API key or switch to **Mock Mode**.")
-            st.stop()
-
-        with st.spinner("🤔 Generating step-by-step study plan..."):
-            plan = generate_plan(
-                goal=st.session_state.goal,
-                llm=llm,
-                memory_summary=memory_summary,
-                tools_registry=TOOLS,
-            )
-            st.session_state.plan = plan
-
-# ── Step 1: Plan Review ───────────────────────────────────────────────────────
-if st.session_state.plan and not st.session_state.run_result:
-    st.subheader("📋 Step 1: Review Proposed Plan")
-    st.info("The agent plans before acting. Approve or decline before any tool executes.")
-
-    for s in st.session_state.plan.steps:
-        badge = "🔒 Requires Confirmation" if s.needs_approval else "🟢 Safe Read/Compute"
-        st.markdown(f"**Step {s.step_num}.** `{s.tool}` — *{s.description}* &nbsp;&nbsp; `{badge}`")
-
-    col_p1, col_p2, _ = st.columns([1.5, 1.5, 4])
-    with col_p1:
-        approve_clicked = st.button("🚀 Approve & Execute Plan", type="primary", use_container_width=True)
-    with col_p2:
-        if st.button("❌ Reject Plan", use_container_width=True):
-            st.session_state.plan = None
-            st.session_state.run_result = None
-            st.warning("Plan was cancelled.")
-            st.rerun()
-
-    # ── Step 2: Execution ─────────────────────────────────────────────────────
-    if approve_clicked:
-        st.subheader("⚡ Step 2: Agent Execution Loop")
-
-        try:
-            llm = get_llm(mode, provider, api_key)
-        except Exception as e:
-            st.error(f"❌ Could not start LLM: {e}")
-            st.stop()
-
-        steps_log: list = []
-        step_placeholder = st.empty()
-
-        def on_step_web(step_record):
-            steps_log.append(step_record)
-            # Bug 4 fix: capture quiz content in session state as agent runs
-            obs = step_record.get("observation", {})
-            action = step_record.get("action")
-            if action and action.get("tool") == "save_file":
-                args = action.get("args", {})
-                fname = args.get("filename", "")
-                content = args.get("content", "")
-                if fname.startswith("quiz_") and content:
-                    st.session_state.quiz_content = content
-                    st.session_state.quiz_filename = fname
-
-            with step_placeholder.container():
-                for s in steps_log:
-                    snum = s.get("step")
-                    thought = s.get("thought", "")
-                    act = s.get("action")
-                    ob = s.get("observation", {})
-                    if act:
-                        tool = act.get("tool", "")
-                        obs_preview = str(ob)[:150] + ("..." if len(str(ob)) > 150 else "")
-                        with st.container():
-                            st.markdown(
-                                f"**[Step {snum}]** 💭 *{thought}*  \n"
-                                f"**Action:** `{tool}`  \n"
-                                f"**Observation:** {obs_preview}"
-                            )
-                            st.divider()
-                    else:
-                        final_ans = ob.get("final_answer", "")
-                        st.success(f"**[Step {snum}] ✅ Final Answer:** {final_ans}")
-
-        # Bug 2 fix: create logger here and store path in session state
-        logger = AgentLogger()
-        st.session_state.logger_path = str(logger.log_file)
-
-        with st.spinner("🤖 Agent running think → act → observe cycle..."):
-            result = run_agent(
-                goal=st.session_state.goal,
-                llm=llm,
-                max_steps=15,
-                memory=st.session_state.memory,  # Bug 5 fix: pass session memory
-                memory_path=DEFAULT_MEMORY_FILE,
-                require_plan=False,
-                confirm_high_risk=False,
-                logger=logger,
-                on_step=on_step_web,
-            )
-            st.session_state.run_result = result
-            # Update session memory from agent result
-            if result.get("memory"):
-                st.session_state.memory = result["memory"]
-            st.rerun()
-
-# ── Step 3: Results & Quiz ────────────────────────────────────────────────────
-if st.session_state.run_result:
-    res = st.session_state.run_result
-    st.divider()
-    st.subheader("🎉 Study Session Complete")
-
-    # Bug 2 fix: use stored logger path string, not the logger object
-    log_ref = f"`{st.session_state.logger_path}`" if st.session_state.logger_path else "log file"
-    st.success(f"Goal achieved in **{res['step_count']} steps**! Logged to {log_ref}.")
-
-    if res.get("final_answer"):
-        st.markdown(f"**Agent Message:**\n\n{res['final_answer']}")
-
-    # Bug 4 fix: show quiz from session state (not ephemeral filesystem)
-    if st.session_state.quiz_content:
-        st.subheader("📝 Practice Quiz")
-        fname = st.session_state.quiz_filename or "quiz.md"
-        with st.expander(f"📖 View Quiz: {fname}", expanded=True):
-            st.markdown(st.session_state.quiz_content)
-        st.download_button(
-            label=f"⬇️ Download {fname}",
-            data=st.session_state.quiz_content,
-            file_name=fname,
-            mime="text/markdown",
+# ── Welcome message on first load ─────────────────────────────────────────────
+if not st.session_state.messages:
+    with st.chat_message("assistant", avatar="🎓"):
+        st.markdown(
+            "👋 **Welcome! I'm your AI Study Agent.**\n\n"
+            "I can help you:\n"
+            "- 📖 **Explain** any topic from your study notes\n"
+            "- 🎯 **Quiz you** adaptively and give instant feedback\n"
+            "- 📊 **Track** your progress across sessions\n"
+            "- 💡 **Break down** complex ideas step by step\n\n"
+            "Click a **quick-start button** above, or just type your study goal below! ✍️"
         )
-    else:
-        # Fallback: check filesystem in case save_file succeeded
-        out_dir = Path("output")
-        quiz_files = sorted(out_dir.glob("quiz_*.md")) if out_dir.exists() else []
-        if quiz_files:
-            st.subheader("📝 Practice Quiz")
-            latest = quiz_files[-1]
-            quiz_text = latest.read_text(encoding="utf-8")
-            with st.expander(f"📖 View Quiz: {latest.name}", expanded=True):
-                st.markdown(quiz_text)
-            st.download_button(
-                label=f"⬇️ Download {latest.name}",
-                data=quiz_text,
-                file_name=latest.name,
-                mime="text/markdown",
-            )
 
-    if st.button("🔄 Start New Session", type="primary"):
-        st.session_state.plan = None
-        st.session_state.run_result = None
-        st.session_state.quiz_content = None
-        st.session_state.quiz_filename = None
-        st.session_state.steps_log = []
-        st.session_state.goal = ""
-        st.rerun()
+# ── Render existing conversation ──────────────────────────────────────────────
+for msg in st.session_state.messages:
+    avatar = "🧑‍🎓" if msg["role"] == "user" else "🎓"
+    with st.chat_message(msg["role"], avatar=avatar):
+        st.markdown(msg["content"])
 
-# ── Welcome Screen (shown only when no plan and no result — Bug 1 fix) ────────
-if not st.session_state.plan and not st.session_state.run_result:
-    st.markdown("### 👋 Welcome! How it works:")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.info("**1. Set Goal**\n\nType your study goal above or click a quick-start button.")
-    with col2:
-        st.info("**2. Review Plan**\n\nThe AI creates a step-by-step plan for you to approve.")
-    with col3:
-        st.info("**3. Agent Runs**\n\nThe agent reads notes, makes a quiz, and saves your progress.")
-    with col4:
-        st.info("**4. Get Results**\n\nDownload your quiz and track your performance over time.")
+# ── Handle pending quick-start prompt ────────────────────────────────────────
+if st.session_state.pending_prompt:
+    user_text = st.session_state.pending_prompt
+    st.session_state.pending_prompt = None
+    # Append and immediately get response
+    st.session_state.messages.append({"role": "user", "content": user_text})
+    with st.chat_message("user", avatar="🧑‍🎓"):
+        st.markdown(user_text)
 
-    st.markdown("---")
-    st.markdown("#### 📚 Example study goals:")
-    st.code("Help me revise photosynthesis for Friday")
-    st.code("Create a 5-question quiz on mitochondria")
-    st.code("Summarise my biology notes and test me")
+    with st.chat_message("assistant", avatar="🎓"):
+        with st.spinner("Thinking…"):
+            reply = get_ai_response(user_text, mode, provider, api_key)
+        st.markdown(reply)
+
+    st.session_state.messages.append({"role": "assistant", "content": reply})
+    st.rerun()
+
+# ── Chat input (always rendered at bottom) ────────────────────────────────────
+if user_input := st.chat_input("Ask me anything about your studies…"):
+    # Show user bubble immediately
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user", avatar="🧑‍🎓"):
+        st.markdown(user_input)
+
+    # Get and stream assistant reply
+    with st.chat_message("assistant", avatar="🎓"):
+        with st.spinner("Thinking…"):
+            reply = get_ai_response(user_input, mode, provider, api_key)
+        st.markdown(reply)
+
+    st.session_state.messages.append({"role": "assistant", "content": reply})
+
+    # Auto-update memory: naive topic detection from conversation
+    low = user_input.lower()
+    if any(w in low for w in ["photosynthesis", "light reaction", "calvin", "chlorophyll"]):
+        record_progress(st.session_state.memory, "photosynthesis", score=0.75,
+                        note="Discussed in chat session.")
+    elif any(w in low for w in ["mitochondria", "atp", "respiration", "krebs", "glycolysis"]):
+        record_progress(st.session_state.memory, "mitochondria", score=0.75,
+                        note="Discussed in chat session.")
+    # Save to disk too
+    try:
+        from study_agent.memory import save_memory
+        save_memory(st.session_state.memory, DEFAULT_MEMORY_FILE)
+    except Exception:
+        pass
