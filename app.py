@@ -75,32 +75,102 @@ def _build_system_prompt() -> str:
 
 
 # ── LLM backends ─────────────────────────────────────────────────────────────
+def _get_active_gemini_model(api_key: str) -> str:
+    """Discovers which Gemini model is active and supported for the provided API key."""
+    if st.session_state.get("active_gemini_model"):
+        return st.session_state.active_gemini_model
+
+    # 1. Try SDK list_models
+    try:
+        import google.generativeai as genai  # type: ignore
+
+        genai.configure(api_key=api_key)
+        available = [
+            m.name.replace("models/", "")
+            for m in genai.list_models()
+            if "generateContent" in getattr(m, "supported_generation_methods", [])
+        ]
+        if available:
+            for pref in ["gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-pro"]:
+                if pref in available:
+                    st.session_state.active_gemini_model = pref
+                    return pref
+            st.session_state.active_gemini_model = available[0]
+            return available[0]
+    except Exception:
+        pass
+
+    # 2. Try HTTP list_models
+    for ver in ["v1beta", "v1"]:
+        try:
+            url = f"https://generativelanguage.googleapis.com/{ver}/models?key={api_key}"
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            available = [
+                m["name"].replace("models/", "")
+                for m in data.get("models", [])
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            ]
+            if available:
+                for pref in ["gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-pro"]:
+                    if pref in available:
+                        st.session_state.active_gemini_model = pref
+                        return pref
+                st.session_state.active_gemini_model = available[0]
+                return available[0]
+        except Exception:
+            pass
+
+    # 3. Default to gemini-2.0-flash
+    st.session_state.active_gemini_model = "gemini-2.0-flash"
+    return "gemini-2.0-flash"
+
+
 def _gemini_sdk(messages: list[dict], api_key: str, model: str) -> str:
-    """Call Gemini via google-generativeai SDK (preferred)."""
+    """Call Gemini via google-generativeai SDK with automatic model fallback."""
     import google.generativeai as genai  # type: ignore
 
     genai.configure(api_key=api_key)
-    gmodel = genai.GenerativeModel(
-        model_name=model,
-        system_instruction=_build_system_prompt(),
-    )
 
-    # Convert to Gemini history format (all but last message)
-    history = [
-        {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
-        for m in messages[:-1]
-    ]
-    chat = gmodel.start_chat(history=history)
-    response = chat.send_message(messages[-1]["content"])
-    return response.text
+    candidates = [model, "gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-pro"]
+    seen = set()
+    ordered = [c for c in candidates if not (c in seen or seen.add(c))]
+
+    last_err = None
+    for cand in ordered:
+        try:
+            gmodel = genai.GenerativeModel(
+                model_name=cand,
+                system_instruction=_build_system_prompt(),
+            )
+            history = [
+                {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
+                for m in messages[:-1]
+            ]
+            chat = gmodel.start_chat(history=history)
+            response = chat.send_message(messages[-1]["content"])
+            if response and response.text:
+                st.session_state.active_gemini_model = cand
+                return response.text
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            if "404" in err_str or "not found" in err_str.lower() or "not supported" in err_str.lower():
+                continue
+            raise e
+
+    if last_err:
+        raise last_err
+    return "No response from Gemini."
 
 
 def _gemini_http(messages: list[dict], api_key: str, model: str) -> str:
-    """Call Gemini via raw HTTP (fallback when SDK not installed)."""
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent?key={api_key}"
-    )
+    """Call Gemini via raw HTTP with multi-version and multi-model fallback."""
+    candidates = [model, "gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-pro"]
+    seen = set()
+    ordered = [c for c in candidates if not (c in seen or seen.add(c))]
+
     contents = [
         {
             "role": "user" if m["role"] == "user" else "model",
@@ -113,23 +183,43 @@ def _gemini_http(messages: list[dict], api_key: str, model: str) -> str:
         "systemInstruction": {"parts": [{"text": _build_system_prompt()}]},
         "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048},
     }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    candidates = body.get("candidates", [])
-    if candidates:
-        parts = candidates[0].get("content", {}).get("parts", [])
-        if parts:
-            return parts[0].get("text", "")
+    data_bytes = json.dumps(payload).encode("utf-8")
+
+    last_err = None
+    for cand in ordered:
+        for ver in ["v1beta", "v1"]:
+            url = f"https://generativelanguage.googleapis.com/{ver}/models/{cand}:generateContent?key={api_key}"
+            req = urllib.request.Request(
+                url,
+                data=data_bytes,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                candidates_out = body.get("candidates", [])
+                if candidates_out:
+                    parts = candidates_out[0].get("content", {}).get("parts", [])
+                    if parts:
+                        st.session_state.active_gemini_model = cand
+                        return parts[0].get("text", "")
+            except urllib.error.HTTPError as he:
+                last_err = he
+                if he.code == 404:
+                    continue
+                raise he
+            except Exception as e:
+                last_err = e
+                continue
+
+    if last_err:
+        raise last_err
     return "No response from Gemini."
 
 
-def _call_gemini(messages: list[dict], api_key: str, model: str = "gemini-1.5-flash") -> str:
+def _call_gemini(messages: list[dict], api_key: str) -> str:
+    model = _get_active_gemini_model(api_key)
     try:
         return _gemini_sdk(messages, api_key, model)
     except ImportError:
