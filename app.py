@@ -1,6 +1,7 @@
 """
-AI Study Agent — Dynamic Conversational Chat Interface
-Full live LLM integration (Gemini / OpenAI) with multi-turn memory.
+AI Study Agent — Universal Multi-Subject Academic Tutor
+Dynamic Conversational Interface with Multi-Subject Support, Deep Doubt Solving,
+Adaptive Quizzing, and Full Live LLM (Gemini / Groq / OpenAI) + Mock Mode.
 """
 
 from pathlib import Path
@@ -19,68 +20,87 @@ from study_agent.memory import (
     reset_memory,
 )
 
-# ── Page config (must be first Streamlit call) ───────────────────────────────
+# ── Page Configuration ────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="AI Study Agent",
+    page_title="AI Study Agent — Universal Academic Tutor",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── System prompt ─────────────────────────────────────────────────────────────
+# ── System Prompt Template ────────────────────────────────────────────────────
 _SYSTEM_PROMPT_TEMPLATE = """\
-You are an expert AI Study Agent — an autonomous, adaptive, goal-driven study assistant.
+You are an Elite Universal AI Study Professor and Master Academic Tutor.
+You possess world-class expertise across ALL academic disciplines:
+- Mathematics (Calculus, Linear Algebra, Discrete Math, Probability & Statistics)
+- Physics (Classical Mechanics, Electromagnetism, Quantum Mechanics, Thermodynamics, Relativity)
+- Computer Science & AI (Algorithms, Data Structures, Machine Learning, Deep Learning, Systems, Software Engineering)
+- Chemistry (Organic, Inorganic, Physical, Analytical Chemistry, Thermodynamics, Kinetics)
+- Biology & Life Sciences (Genetics, Molecular Biology, Physiology, Biochemistry, Ecology)
+- Engineering, Humanities, Economics, and Social Sciences.
 
-Your capabilities:
-- Break down complex topics into clear, digestible explanations tailored to the student's level.
-- Create adaptive quizzes (multiple-choice, short-answer, true/false) and give instant feedback.
-- Track what the student has covered so far and what they are struggling with.
-- Provide hints, worked examples, and step-by-step explanations when asked.
-- Celebrate progress and keep the student motivated.
-- Summarise key concepts at the end of a session when requested.
+Active Session Context:
+- Target Subject Focus: {selected_subject}
+- Study Mode: {study_mode}
+- Academic Depth / Level: {academic_level}
 
-Available Study Notes (use these as your primary source of truth):
+Your Mission:
+1. Answer ANY doubt or complicated question with complete conceptual clarity, intellectual depth, and pedagogical patience.
+2. When solving math or physics problems, show step-by-step derivations using LaTeX math notation ($...$ and $$...$$).
+3. When solving computer science problems, provide optimal, well-commented code implementations with Time and Space Big-O analysis.
+4. Adapt to the study mode:
+   - "💡 Deep Concept Breakdown": Provide intuitive real-world analogies, underlying principles, edge cases, and why the concept matters.
+   - "🎯 Interactive Adaptive Quiz": Ask thought-provoking questions, wait for answers, evaluate student reasoning, and explain why alternative options are incorrect.
+   - "⚡ Instant Doubt Solver": Deliver razor-sharp, direct, exam-ready answers to homework or conceptual questions.
+   - "💻 Code & Problem Solver": Write clean runnable code, explain algorithm design, and demonstrate test cases.
+   - "📝 Summary & Cheat Sheet": Create structured, high-yield bulleted cheat sheets, key formulas, and must-know takeaways.
+5. Reference Notes Context:
+   Below are the student's project notes files. Use them as trusted curriculum references, but NEVER be restricted by them. You are free and encouraged to explain any concept in the universe:
 {notes_context}
 
-Student Memory & Progress:
+6. Student Profile & Memory:
 {memory_context}
 
-Behaviour rules:
-- Be conversational, encouraging, and clear.
-- Use markdown formatting (headers, bold key terms, bullet lists, code blocks for equations).
-- After answering, ask a follow-up question to check understanding.
-- When the student gets a quiz question wrong, explain the correct answer and offer another question.
-- Adapt difficulty based on how the student is responding.
-- Never invent facts beyond the notes provided; say so if the question is out of scope.
+Response Formatting Rules:
+- Use rich GitHub Flavored Markdown (headers, bullet points, bold key terms, tables).
+- Format all math equations in LaTeX ($x^2 + y^2 = r^2$ or display math).
+- Keep tone encouraging, rigorous, and inspiring.
+- End each substantial response with a thought-provoking check-for-understanding question or next-step challenge.
 """
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Note Loading Helper ───────────────────────────────────────────────────────
 def _load_all_notes() -> str:
     notes_dir = Path("notes")
     if not notes_dir.exists():
-        return "No study notes found."
+        return "No study notes files found."
     sections = []
     for f in sorted(notes_dir.glob("*.md")):
-        sections.append(f"### {f.stem.capitalize()}\n{f.read_text(encoding='utf-8')}")
-    return "\n\n".join(sections) if sections else "No study notes found."
+        sections.append(f"### File: {f.name}\n{f.read_text(encoding='utf-8')}")
+    return "\n\n".join(sections) if sections else "No study notes files found."
 
 
 def _build_system_prompt() -> str:
     mem = st.session_state.get("memory", get_empty_memory())
+    subj = st.session_state.get("selected_subject", "🌐 All Subjects (Universal Tutor)")
+    mode = st.session_state.get("study_mode", "💡 Deep Concept Breakdown")
+    level = st.session_state.get("academic_level", "🎓 Undergraduate / University")
     return _SYSTEM_PROMPT_TEMPLATE.format(
+        selected_subject=subj,
+        study_mode=mode,
+        academic_level=level,
         notes_context=_load_all_notes(),
         memory_context=format_memory_for_prompt(mem),
     )
 
 
-# ── LLM backends ─────────────────────────────────────────────────────────────
+# ── LLM Backends ──────────────────────────────────────────────────────────────
 def _get_active_gemini_model(api_key: str) -> str:
     """Discovers which Gemini model is active and supported for the provided API key."""
     if st.session_state.get("active_gemini_model"):
         return st.session_state.active_gemini_model
 
-    # 1. Try SDK list_models
+    # Try SDK list_models
     try:
         import google.generativeai as genai  # type: ignore
 
@@ -100,7 +120,7 @@ def _get_active_gemini_model(api_key: str) -> str:
     except Exception:
         pass
 
-    # 2. Try HTTP list_models
+    # Try HTTP list_models
     for ver in ["v1beta", "v1"]:
         try:
             url = f"https://generativelanguage.googleapis.com/{ver}/models?key={api_key}"
@@ -122,7 +142,6 @@ def _get_active_gemini_model(api_key: str) -> str:
         except Exception:
             pass
 
-    # 3. Default to gemini-2.0-flash
     st.session_state.active_gemini_model = "gemini-2.0-flash"
     return "gemini-2.0-flash"
 
@@ -132,7 +151,6 @@ def _gemini_sdk(messages: list[dict], api_key: str, model: str) -> str:
     import google.generativeai as genai  # type: ignore
 
     genai.configure(api_key=api_key)
-
     candidates = [model, "gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-pro"]
     seen = set()
     ordered = [c for c in candidates if not (c in seen or seen.add(c))]
@@ -231,6 +249,7 @@ def _call_groq(messages: list[dict], api_key: str, model: str = "llama-3.3-70b-v
     full = [{"role": "system", "content": _build_system_prompt()}] + messages
     try:
         from openai import OpenAI  # type: ignore
+
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
         response = client.chat.completions.create(
             model=model, messages=full, temperature=0.7, max_tokens=2048
@@ -256,100 +275,145 @@ def _call_groq(messages: list[dict], api_key: str, model: str = "llama-3.3-70b-v
         return "No response from Groq."
 
 
-def _openai_sdk(messages: list[dict], api_key: str, model: str) -> str:
-    """Call OpenAI via openai SDK (preferred)."""
-    from openai import OpenAI  # type: ignore
-
-    client = OpenAI(api_key=api_key)
-    full = [{"role": "system", "content": _build_system_prompt()}] + messages
-    response = client.chat.completions.create(
-        model=model, messages=full, temperature=0.7, max_tokens=2048
-    )
-    return response.choices[0].message.content
-
-
-def _openai_http(messages: list[dict], api_key: str, model: str) -> str:
-    """Call OpenAI via raw HTTP (fallback when SDK not installed)."""
-    url = "https://api.openai.com/v1/chat/completions"
-    full = [{"role": "system", "content": _build_system_prompt()}] + messages
-    payload = {"model": model, "messages": full, "temperature": 0.7, "max_tokens": 2048}
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    choices = body.get("choices", [])
-    if choices:
-        return choices[0].get("message", {}).get("content", "")
-    return "No response from OpenAI."
-
-
 def _call_openai(messages: list[dict], api_key: str, model: str = "gpt-4o-mini") -> str:
+    """Call OpenAI via official SDK or HTTP fallback."""
+    full = [{"role": "system", "content": _build_system_prompt()}] + messages
     try:
-        return _openai_sdk(messages, api_key, model)
+        from openai import OpenAI  # type: ignore
+
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model, messages=full, temperature=0.7, max_tokens=2048
+        )
+        return response.choices[0].message.content
     except ImportError:
-        return _openai_http(messages, api_key, model)
+        url = "https://api.openai.com/v1/chat/completions"
+        payload = {"model": model, "messages": full, "temperature": 0.7, "max_tokens": 2048}
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        choices = body.get("choices", [])
+        if choices:
+            return choices[0].get("message", {}).get("content", "")
+        return "No response from OpenAI."
 
 
+# ── Rich Multi-Subject Mock Mode ──────────────────────────────────────────────
 def _mock_response(user_message: str) -> str:
-    """Deterministic fallback when no API key is available."""
+    """Intelligent multi-subject offline responder with deep conceptual coverage."""
     msg = user_message.lower()
-    if any(w in msg for w in ["photosynthesis", "light reaction", "calvin", "rubisco"]):
+
+    # Physics
+    if any(w in msg for w in ["physics", "quantum", "newton", "maxwell", "force", "velocity", "relativity", "photoelectric", "entropy"]):
         return (
-            "Great question! 🌱 Let me break down **Photosynthesis** for you.\n\n"
-            "**Core equation:**\n"
-            "> 6CO₂ + 6H₂O + light → C₆H₁₂O₆ + 6O₂\n\n"
-            "**Two stages:**\n"
-            "1. **Light-Dependent Reactions** (thylakoid membranes)\n"
-            "   - Splits water (photolysis) → releases O₂\n"
-            "   - Produces ATP and NADPH\n"
-            "2. **Calvin Cycle** (stroma)\n"
-            "   - Uses ATP + NADPH to fix CO₂ → glucose\n"
-            "   - Key enzyme: **RuBisCO**\n\n"
-            "💡 **Quick check:** What two products of the light-dependent reactions "
-            "are used in the Calvin Cycle?"
+            "### ⚛️ Physics Conceptual Breakdown\n\n"
+            "Let's tackle your physics question step-by-step!\n\n"
+            "#### 1. Fundamental Principles\n"
+            "- **Newton's Second Law**: $\\vec{F}_{\\text{net}} = \\frac{d\\vec{p}}{dt} = m\\vec{a}$ relates force to the rate of momentum change.\n"
+            "- **Energy Conservation**: $E_{\\text{total}} = K + U = \\text{constant}$ in any closed conservative system.\n"
+            "- **Quantum Wave-Particle Duality**: Louis de Broglie established that all matter exhibits wave properties: $\\lambda = \\frac{h}{p}$.\n\n"
+            "#### 2. Advanced Insights (Maxwell & Einstein)\n"
+            "- Maxwell unified electricity and magnetism into light: $c = \\frac{1}{\\sqrt{\\mu_0 \\varepsilon_0}} \\approx 3 \\times 10^8\\text{ m/s}$.\n"
+            "- In Special Relativity, relativistic total energy is: $E^2 = (pc)^2 + (m_0 c^2)^2$.\n\n"
+            "💡 **Doubt Check:** Would you like to derive a specific equation or solve a numerical problem next?"
         )
-    if any(w in msg for w in ["mitochondria", "atp", "respiration", "krebs", "glycolysis"]):
+
+    # Mathematics
+    if any(w in msg for w in ["math", "calculus", "derivative", "integral", "matrix", "eigen", "bayes", "probability", "taylor", "vector"]):
         return (
-            "⚡ Let's explore **Mitochondria & Cellular Respiration**!\n\n"
-            "Mitochondria are the **powerhouse of the cell** — they produce ATP.\n\n"
-            "**Three stages:**\n"
-            "1. **Glycolysis** → cytoplasm → 2 ATP\n"
-            "2. **Krebs Cycle** → mitochondrial matrix → electron carriers\n"
-            "3. **Oxidative Phosphorylation (ETC)** → inner membrane → ~34 ATP\n\n"
-            "💡 **Quick check:** Where exactly does glycolysis occur — inside or "
-            "outside the mitochondrion?"
+            "### 📐 Mathematics & Derivation Deep Dive\n\n"
+            "Here is the mathematical framework for this topic:\n\n"
+            "#### 1. Core Calculus & Analysis\n"
+            "- **Fundamental Theorem of Calculus**:\n"
+            "  $$\\frac{d}{dx} \\int_a^x f(t)\\,dt = f(x) \\quad \\text{and} \\quad \\int_a^b f'(x)\\,dx = f(b) - f(a)$$\n"
+            "- **Taylor Series Expansion** about $x = a$:\n"
+            "  $$f(x) = \\sum_{n=0}^{\\infty} \\frac{f^{(n)}(a)}{n!}(x-a)^n = f(a) + f'(a)(x-a) + \\frac{f''(a)}{2!}(x-a)^2 + \\dots$$\n\n"
+            "#### 2. Linear Algebra Foundation\n"
+            "- An eigenvector $\\vec{v}$ with eigenvalue $\\lambda$ satisfies $A\\vec{v} = \\lambda \\vec{v}$, found via the characteristic equation $\\det(A - \\lambda I) = 0$.\n"
+            "- **Bayes' Theorem** for updating probabilistic beliefs: $P(A|B) = \\frac{P(B|A)P(A)}{P(B)}$.\n\n"
+            "💡 **Next Step:** Should we work through a specific proof or solve a sample exercise?"
         )
-    if any(w in msg for w in ["quiz", "test me", "question"]):
+
+    # Computer Science & AI
+    if any(w in msg for w in ["algorithm", "data structure", "big-o", "dijkstra", "dynamic programming", "python", "code", "neural", "transformer", "tree", "graph"]):
         return (
-            "🎯 Let's test your knowledge!\n\n"
-            "**Question 1:** Which enzyme is responsible for fixing CO₂ in the Calvin Cycle?\n"
-            "- A) ATP Synthase\n"
-            "- B) **RuBisCO** ✅\n"
-            "- C) Helicase\n"
-            "- D) Amylase\n\n"
-            "**Question 2:** Glycolysis produces how many net ATP molecules per glucose?\n"
-            "- A) 36\n"
-            "- B) 4\n"
-            "- C) **2** ✅\n"
-            "- D) 0\n\n"
-            "Reply with your answers or say **'next question'** for more! 🚀"
+            "### 💻 Computer Science, Algorithms & AI Architecture\n\n"
+            "Let's break down this computational concept:\n\n"
+            "#### 1. Complexity & Algorithmic Paradigm\n"
+            "- **Time Complexity**: Optimal algorithms aim for $O(n)$ or $O(n \\log n)$, avoiding naive $O(n^2)$ or exponential $O(2^n)$ bottlenecks.\n"
+            "- **Dynamic Programming**: Solves problems with *optimal substructure* and *overlapping subproblems* via memoization or tabulation.\n\n"
+            "```python\n"
+            "def dijkstra(graph, start):\n"
+            "    import heapq\n"
+            "    distances = {node: float('inf') for node in graph}\n"
+            "    distances[start] = 0\n"
+            "    pq = [(0, start)]\n"
+            "    while pq:\n"
+            "        curr_d, curr_u = heapq.heappop(pq)\n"
+            "        if curr_d > distances[curr_u]: continue\n"
+            "        for v, weight in graph[curr_u].items():\n"
+            "            if distances[curr_u] + weight < distances[v]:\n"
+            "                distances[v] = distances[curr_u] + weight\n"
+            "                heapq.heappush(pq, (distances[v], v))\n"
+            "    return distances\n"
+            "```\n\n"
+            "#### 2. AI & Transformers\n"
+            "- Modern LLMs utilize Scaled Dot-Product Self-Attention: $\\text{Attention}(Q, K, V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V$.\n\n"
+            "💡 **Challenge:** Would you like to analyze edge cases or optimize space complexity?"
         )
+
+    # Chemistry
+    if any(w in msg for w in ["chemistry", "reaction", "organic", "bond", "sn1", "sn2", "equilibrium", "acid", "gibbs", "hybridization"]):
+        return (
+            "### 🧪 Chemistry & Reaction Mechanics\n\n"
+            "Here is the chemical rationale and molecular overview:\n\n"
+            "#### 1. Reaction Mechanisms ($S_N1$ vs $S_N2$)\n"
+            "- **$S_N1$ (Substitution Nucleophilic Unimolecular)**:\n"
+            "  - 2-step process with a planar carbocation intermediate $\\implies$ racemization.\n"
+            "  - Favored by tertiary ($3^\\circ$) halides and polar protic solvents.\n"
+            "- **$S_N2$ (Substitution Nucleophilic Bimolecular)**:\n"
+            "  - 1-step concerted backside attack $\\implies$ Walden inversion.\n"
+            "  - Favored by primary ($1^\\circ$) halides and polar aprotic solvents.\n\n"
+            "#### 2. Thermodynamics & Equilibrium\n"
+            "- **Gibbs Free Energy**: $\\Delta G = \\Delta H - T\\Delta S$. Spontaneous when $\\Delta G < 0$.\n"
+            "- **Equilibrium Relationship**: $\\Delta G^\\circ = -RT \\ln K_{\\text{eq}}$.\n\n"
+            "💡 **Test Question:** What stereochemical outcome would you predict for an $S_N2$ reaction on an $(R)$-enantiomer?"
+        )
+
+    # Biology
+    if any(w in msg for w in ["biology", "photosynthesis", "mitochondria", "dna", "cell", "genetics", "respiration", "krebs", "calvin", "evolution"]):
+        return (
+            "### 🧬 Life Sciences & Molecular Biology\n\n"
+            "Here is the biological mechanism explained clearly:\n\n"
+            "#### 1. Photosynthesis & Cellular Respiration\n"
+            "- **Photosynthesis**: $6\\text{CO}_2 + 6\\text{H}_2\\text{O} + \\text{light} \\to \\text{C}_6\\text{H}_{12}\\text{O}_6 + 6\\text{O}_2$.\n"
+            "  - Light Reactions (thylakoid): Photolysis of water releases $\\text{O}_2$, generating ATP and NADPH.\n"
+            "  - Calvin Cycle (stroma): Enzyme **RuBisCO** fixes $\\text{CO}_2$ into glucose.\n"
+            "- **Cellular Respiration**: Glycolysis (cytoplasm) $\\to$ Krebs Cycle (matrix) $\\to$ Oxidative Phosphorylation (cristae) $\\approx 32\\text{--}36$ ATP.\n\n"
+            "#### 2. Molecular Genetics & Central Dogma\n"
+            "- $\\text{DNA} \\xrightarrow{\\text{Transcription}} \\text{mRNA} \\xrightarrow{\\text{Translation}} \\text{Protein}$.\n"
+            "- Semi-conservative DNA replication by DNA Polymerase ($5' \\to 3'$ direction).\n\n"
+            "💡 **Check:** Where does oxidative phosphorylation occur in eukaryotic cells?"
+        )
+
+    # Default / General Doubt Handler
     return (
-        "👋 Hi! I'm your **AI Study Agent** running in **Mock Mode** (no API key needed).\n\n"
-        "I can help you:\n"
-        "- 📖 **Explain topics** — ask about photosynthesis, mitochondria, cell biology…\n"
-        "- 🎯 **Quiz you** — say *'quiz me on photosynthesis'*\n"
-        "- 📊 **Track progress** — I remember what we've covered this session\n\n"
-        "To unlock full AI responses, add your **Gemini** or **OpenAI** API key in the sidebar "
-        "and switch to **Live LLM** mode.\n\n"
-        "What would you like to study today?"
+        "### 🎓 Universal Study Tutor Response (Mock Mode)\n\n"
+        f"You asked: **\"{user_message}\"**\n\n"
+        "Here is the structured breakdown:\n\n"
+        "1. **Core Concept Definition**: The topic deals with foundational laws and relationships governing systems in this subject.\n"
+        "2. **Step-by-Step Logic**: Break the problem down into premises, intermediate derivations, and conclusions.\n"
+        "3. **Practical Application**: Real-world systems implement this principle to optimize stability, efficiency, or accuracy.\n\n"
+        "*(Note: You are currently running in **Mock Mode**. Switch to **Live LLM** in the sidebar and enter a free key from Groq or Gemini to get full dynamic answers to any custom doubt!)*\n\n"
+        "What specific detail would you like to explore further?"
     )
 
 
@@ -361,13 +425,12 @@ def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | 
     # No key → friendly message + mock fallback
     if not api_key or not api_key.strip():
         st.warning(
-            "⚠️ No API key found — using Mock Mode. "
-            "Add your Gemini key in the sidebar to get real AI responses.",
+            "⚠️ No API key found in sidebar — responding via Mock Mode. "
+            "Select **Groq** or **Gemini** and paste your key for real AI answers.",
             icon="🔑",
         )
         return _mock_response(user_message)
 
-    # Build the full conversation for the API call
     messages = [
         {"role": m["role"], "content": m["content"]}
         for m in st.session_state.messages
@@ -378,10 +441,9 @@ def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | 
             reply = _call_openai(messages, api_key.strip())
         elif provider == "groq":
             reply = _call_groq(messages, api_key.strip())
-        else:  # "gemini" or "auto"
+        else:  # "gemini"
             reply = _call_gemini(messages, api_key.strip())
 
-        # Detect error strings returned by the backends and fall back gracefully
         if reply.startswith("❌"):
             raise RuntimeError(reply)
         return reply
@@ -390,21 +452,20 @@ def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | 
         body = e.read().decode("utf-8", errors="replace")
         if e.code in (400, 401, 403):
             st.error(
-                f"**API key error ({e.code}):** The key was rejected by the provider.\n\n"
-                "👉 Double check that your key is active and correctly pasted.",
+                f"**API key error ({e.code}):** The key was rejected by {provider.capitalize()}.\n\n"
+                "Please verify your API key in the sidebar.",
                 icon="🔑",
             )
         elif e.code == 404 and provider == "gemini":
             st.error(
-                "### ⚠️ Gemini API Disabled for this Project\n\n"
-                "Google returned a `404` error because your API key was created inside an **imported Google Cloud project** (`Gemini Project`) where the **Generative Language API is not enabled**.\n\n"
+                "### ⚠️ Gemini API Service Disabled in Google Cloud\n\n"
+                "Google returned `404 Not Found` because your key was linked to an **imported project** (`Gemini Project`) with the Generative Language API disabled.\n\n"
                 "#### ✅ How to fix in 10 seconds:\n"
-                "1. Open [Google AI Studio API Keys](https://aistudio.google.com/app/apikey)\n"
+                "1. Open [Google AI Studio](https://aistudio.google.com/app/apikey)\n"
                 "2. Click **Create API key**\n"
-                "3. Select **'Create API key in new project'** *(do NOT select 'Gemini Project')*\n"
-                "4. Copy that new key and paste it here!\n\n"
-                "*(Or enable the API in your current project: [Enable Generative Language API](https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com))*\n\n"
-                "💡 *Tip: You can also choose **Groq (Free LLaMA 3.3)** in the sidebar dropdown for free, instant ChatGPT-style performance.*",
+                "3. Choose **'Create API key in new project'** *(do NOT select Gemini Project)*\n"
+                "4. Copy and paste the key here!\n\n"
+                "💡 *Or select **Groq (Free LLaMA 3.3)** in the sidebar for free, instant ChatGPT-style performance.*",
                 icon="🚨",
             )
         else:
@@ -415,21 +476,19 @@ def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | 
         err = str(e)
         if "API_KEY_INVALID" in err:
             st.error(
-                "**Invalid API key.** The key you entered was rejected by the provider.\n\n"
-                "Please verify your key in the sidebar.",
+                "**Invalid API key.** The key you entered was rejected. Please check your key in the sidebar.",
                 icon="🔑",
             )
         elif "404" in err and provider == "gemini":
             st.error(
                 "### ⚠️ Generative Language API Not Enabled on Google Cloud\n\n"
-                "Google returned `404 Not Found` because the **Generative Language API** is not enabled in your selected Google Cloud project (`Gemini Project`).\n\n"
-                "#### ✅ Easy 10-Second Fix:\n"
+                "Google returned `404 Not Found` for this project.\n\n"
+                "#### ✅ 10-Second Fix:\n"
                 "1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey)\n"
                 "2. Click **Create API key**\n"
-                "3. Choose **'Create API key in new project'** (AI Studio will enable everything automatically)\n"
-                "4. Copy the new key and paste it in the sidebar!\n\n"
-                "*(Or click here to enable it in your existing project: [Enable Generative Language API](https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com))*\n\n"
-                "🚀 *Alternative: Switch Provider to **Groq (Free LLaMA 3.3)** in the sidebar — get a free key from [console.groq.com](https://console.groq.com) in 10 seconds!*",
+                "3. Choose **'Create API key in new project'** (all models enabled automatically)\n"
+                "4. Paste the new key here!\n\n"
+                "🚀 *Alternative: Switch Provider to **Groq (Free LLaMA 3.3)** — get a free key from [console.groq.com](https://console.groq.com) in 10 seconds!*",
                 icon="🚨",
             )
         else:
@@ -437,22 +496,21 @@ def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | 
         return _mock_response(user_message)
 
 
-# ── Session-state bootstrap ───────────────────────────────────────────────────
+# ── Session State Initialization ──────────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "memory" not in st.session_state:
     mem, _ = load_memory(DEFAULT_MEMORY_FILE)
     st.session_state.memory = mem
 if "pending_prompt" not in st.session_state:
-    # Set by quick-start buttons; consumed on the next render cycle
     st.session_state.pending_prompt = None
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ── Sidebar UI ────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Agent Controls")
 
-    # Auto-detect secrets so we default to Live if a key is already configured
+    # Detect secrets
     _secret_gemini, _secret_openai, _secret_groq = None, None, None
     try:
         _secret_gemini = st.secrets.get("GEMINI_API_KEY") or None
@@ -464,21 +522,21 @@ with st.sidebar:
 
     mode = st.radio(
         "LLM Engine:",
-        ["Mock Mode (Free, Instant)", "Live LLM (Gemini / Groq / OpenAI)"],
+        ["Mock Mode (Free, Instant)", "Live LLM (Groq / Gemini / OpenAI)"],
         index=0 if not _has_secret else 1,
     )
 
     api_key: str | None = None
-    provider = "gemini"
+    provider = "groq"
 
-    if mode == "Live LLM (Gemini / Groq / OpenAI)":
+    if mode == "Live LLM (Groq / Gemini / OpenAI)":
         provider = st.selectbox(
-            "Provider:",
-            ["gemini", "groq", "openai"],
+            "AI Provider:",
+            ["groq", "gemini", "openai"],
             format_func=lambda x: {
-                "gemini": "Google Gemini (Flash)",
-                "groq": "Groq (Free LLaMA 3.3 - Like GPT)",
-                "openai": "OpenAI (GPT-4o-mini)",
+                "groq": "⚡ Groq (Free LLaMA 3.3 - Fast & Smart like GPT-4o)",
+                "gemini": "✨ Google Gemini (Flash / Pro)",
+                "openai": "🧠 OpenAI (ChatGPT / GPT-4o-mini)",
             }.get(x, x),
         )
 
@@ -494,13 +552,13 @@ with st.sidebar:
             st.success("🔑 API key loaded from Streamlit secrets.")
         else:
             placeholders = {
-                "gemini": "AIza… (Google Gemini Key)",
-                "groq": "gsk_… (Groq Free Key)",
-                "openai": "sk-… (OpenAI Key)",
+                "groq": "gsk_… (Groq Free API Key)",
+                "gemini": "AIza… (Google Gemini API Key)",
+                "openai": "sk-… (OpenAI API Key)",
             }
             help_links = {
-                "gemini": "Get a key → https://aistudio.google.com/app/apikey (choose 'new project')",
-                "groq": "Get free instant key → https://console.groq.com/keys",
+                "groq": "Get free instant key → https://console.groq.com/keys (No credit card)",
+                "gemini": "Get free key → https://aistudio.google.com/app/apikey (choose 'new project')",
                 "openai": "Get OpenAI key → https://platform.openai.com/api-keys",
             }
             api_key = st.text_input(
@@ -511,53 +569,90 @@ with st.sidebar:
             )
             if not api_key:
                 links_md = {
-                    "gemini": "[Get a free Gemini key](https://aistudio.google.com/app/apikey) *(select 'new project')*",
-                    "groq": "[Get a free Groq key](https://console.groq.com/keys) *(free, 300+ tokens/sec, like GPT)*",
+                    "groq": "[Get a free Groq key in 10s](https://console.groq.com/keys) *(Highly Recommended: 300+ tokens/sec, no credit card)*",
+                    "gemini": "[Get a free Gemini key](https://aistudio.google.com/app/apikey) *(Important: choose 'Create in new project')*",
                     "openai": "[Get an OpenAI key](https://platform.openai.com/api-keys)",
                 }
                 st.info(
-                    f"Enter your {provider.capitalize()} API key above or switch to **Mock Mode**.\n\n"
+                    f"Enter your {provider.upper()} API key above or use **Mock Mode**.\n\n"
                     f"👉 {links_md.get(provider, '')}"
                 )
     else:
-        st.success("✅ Mock Mode — no API key required.")
+        st.success("✅ Mock Mode active — 100% free offline learning mode.")
 
     st.divider()
 
-    # ── Student Memory ────────────────────────────────────────────────────────
-    st.header("🧠 Student Memory")
+    # ── Subject & Mode Configuration ──────────────────────────────────────────
+    st.header("🎯 Study Customization")
+
+    st.session_state.selected_subject = st.selectbox(
+        "Subject Domain:",
+        [
+            "🌐 All Subjects (Universal Tutor)",
+            "🧬 Biology & Genetics",
+            "⚛️ Physics & Quantum Mechanics",
+            "🧪 Chemistry & Organic Reactions",
+            "💻 Computer Science, Algorithms & AI",
+            "📐 Mathematics, Calculus & Linear Algebra",
+        ],
+    )
+
+    st.session_state.study_mode = st.selectbox(
+        "Study Mode:",
+        [
+            "💡 Deep Concept Breakdown",
+            "🎯 Interactive Adaptive Quiz",
+            "⚡ Instant Doubt Solver",
+            "💻 Code & Problem Solver",
+            "📝 Summary & Cheat Sheet",
+        ],
+    )
+
+    st.session_state.academic_level = st.select_slider(
+        "Academic Level:",
+        options=[
+            "🎒 High School / Foundation",
+            "🎓 Undergraduate / University",
+            "🔬 Advanced / Research / Olympiad",
+        ],
+        value="🎓 Undergraduate / University",
+    )
+
+    st.divider()
+
+    # ── Student Memory & Tracking ─────────────────────────────────────────────
+    st.header("🧠 Student Memory & Progress")
     mem = st.session_state.memory
     weak_spots = mem.get("weak_spots", [])
     if weak_spots:
-        st.markdown("**Known Weak Spots:**")
+        st.markdown("**Identified Weak Spots:**")
         for ws in weak_spots:
             st.markdown(f"- 🔴 `{ws}`")
     else:
-        st.caption("No weak spots recorded yet.")
+        st.caption("No weak spots recorded yet. Ask doubts or take quizzes to track!")
 
     progress = mem.get("progress", {})
     if progress:
-        st.markdown("**Topic Progress:**")
+        st.markdown("**Topic Mastery Progress:**")
         for topic, data in progress.items():
             score = data.get("score", 0)
             icon = "🟢" if score >= 0.8 else "🟡" if score >= 0.5 else "🔴"
-            st.markdown(f"- {icon} **{topic}**: {score:.0%}")
+            st.markdown(f"- {icon} **{topic.capitalize()}**: `{score:.0%}`")
 
     if st.button("🗑️ Reset Memory", use_container_width=True):
         st.session_state.memory = get_empty_memory()
         reset_memory(DEFAULT_MEMORY_FILE)
-        st.toast("Memory reset!")
+        st.toast("Memory reset successfully!")
         st.rerun()
 
     st.divider()
 
-    # ── Chat controls ─────────────────────────────────────────────────────────
-    st.header("💬 Chat Controls")
-    if mode == "Live LLM (Gemini / OpenAI)" and provider == "gemini":
-        active_m = st.session_state.get("active_gemini_model", "gemini-2.0-flash")
-        st.caption(f"🤖 Connected Model: `{active_m}`")
+    # ── Chat Controls ─────────────────────────────────────────────────────────
+    st.header("💬 Conversation Controls")
+    if mode.startswith("Live LLM"):
+        st.caption(f"⚡ Active Provider: **{provider.upper()}**")
 
-    if st.button("🔄 Clear Conversation", use_container_width=True):
+    if st.button("🔄 Clear Chat History", use_container_width=True):
         st.session_state.messages = []
         st.session_state.pending_prompt = None
         st.session_state.active_gemini_model = None
@@ -565,105 +660,131 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Available Notes ───────────────────────────────────────────────────────
-    st.header("📁 Study Notes")
+    # ── Study Notes Library ───────────────────────────────────────────────────
+    st.header("📁 Study Notes Library")
     notes_dir = Path("notes")
     if notes_dir.exists():
-        note_files = [p.name for p in notes_dir.glob("*.md")]
+        note_files = sorted([p.name for p in notes_dir.glob("*.md")])
         if note_files:
-            sel = st.selectbox("Inspect note:", note_files)
+            sel = st.selectbox("Inspect Curriculum Note:", note_files)
             if sel:
-                with st.expander(f"📄 {sel}"):
+                with st.expander(f"📄 View {sel}"):
                     st.markdown((notes_dir / sel).read_text(encoding="utf-8"))
         else:
             st.caption("No notes files found.")
     else:
-        st.caption("⚠️ `notes/` folder not present.")
+        st.caption("⚠️ Notes directory not found.")
 
 
-# ── Main area ─────────────────────────────────────────────────────────────────
-st.title("🎓 AI Study Agent")
-st.caption("Autonomous, goal-driven study assistant · Powered by Gemini or OpenAI")
+# ── Main Header ───────────────────────────────────────────────────────────────
+st.title("🎓 AI Study Agent — Universal Academic Tutor")
+st.markdown(
+    f"**Expert Academic Assistant** · Active Domain: **{st.session_state.selected_subject}** · Mode: **{st.session_state.study_mode}**"
+)
 
-# ── Quick-start buttons ───────────────────────────────────────────────────────
-qc1, qc2, qc3, qc4 = st.columns(4)
-_quick_prompts = {
-    "🌱 Revise Photosynthesis":    "Help me revise photosynthesis. Start with the key concepts and then quiz me.",
-    "⚡ Revise Mitochondria":      "Help me revise mitochondria and cellular respiration. Give me a summary then quiz me.",
-    "📝 Quiz on Cell Biology":     "Quiz me on cell biology topics including photosynthesis and mitochondria.",
-    "📊 Show My Progress":         "Show me what I've studied so far and what my weak spots are.",
-}
-_btns = list(_quick_prompts.items())
-for col, (label, prompt) in zip([qc1, qc2, qc3, qc4], _btns):
-    with col:
-        if st.button(label, use_container_width=True):
-            st.session_state.pending_prompt = prompt
-            st.rerun()
+# ── Dynamic Multi-Subject Quick Start Buttons ─────────────────────────────────
+st.markdown("#### ⚡ Quick Launch Study Challenges & Topics:")
+row1_col1, row1_col2, row1_col3 = st.columns(3)
+with row1_col1:
+    if st.button("⚛️ Quantum Mechanics & Wave Duality", use_container_width=True):
+        st.session_state.pending_prompt = "Explain wave-particle duality, the de Broglie wavelength, and the Heisenberg Uncertainty Principle with physical intuition."
+        st.rerun()
+with row1_col2:
+    if st.button("💻 Graph Algorithms & Dijkstra / DP", use_container_width=True):
+        st.session_state.pending_prompt = "Explain Dijkstra's shortest path algorithm vs Bellman-Ford, including time complexities and Python implementation with a priority queue."
+        st.rerun()
+with row1_col3:
+    if st.button("📐 Multivariable Calculus & Optimization", use_container_width=True):
+        st.session_state.pending_prompt = "Derive how Lagrange Multipliers work for constrained multivariable optimization with geometric intuition and an example."
+        st.rerun()
+
+row2_col1, row2_col2, row2_col3 = st.columns(3)
+with row2_col1:
+    if st.button("🧪 Organic Chemistry: SN1 vs SN2", use_container_width=True):
+        st.session_state.pending_prompt = "Compare SN1 and SN2 reaction mechanisms: kinetics, stereochemistry, solvent effects, substrate favorability, and carbocation stability."
+        st.rerun()
+with row2_col2:
+    if st.button("🧬 Central Dogma & DNA Replication", use_container_width=True):
+        st.session_state.pending_prompt = "Explain the molecular mechanics of DNA replication (leading vs lagging strands, Okazaki fragments) and transcription to translation."
+        st.rerun()
+with row2_col3:
+    if st.button("🎯 Adaptive Quiz on Complex Doubts", use_container_width=True):
+        st.session_state.pending_prompt = "Create a 5-question multi-subject challenging quiz across Physics, Calculus, and Computer Science to test my deep problem-solving skills."
+        st.rerun()
 
 st.divider()
 
-# ── Welcome message on first load ─────────────────────────────────────────────
+# ── Welcome Banner ────────────────────────────────────────────────────────────
 if not st.session_state.messages:
     with st.chat_message("assistant", avatar="🎓"):
         st.markdown(
-            "👋 **Welcome! I'm your AI Study Agent.**\n\n"
-            "I can help you:\n"
-            "- 📖 **Explain** any topic from your study notes\n"
-            "- 🎯 **Quiz you** adaptively and give instant feedback\n"
-            "- 📊 **Track** your progress across sessions\n"
-            "- 💡 **Break down** complex ideas step by step\n\n"
-            "Click a **quick-start button** above, or just type your study goal below! ✍️"
+            "👋 **Welcome! I am your Universal AI Study Tutor.**\n\n"
+            "Ask me **ANY academic doubt, complex theoretical problem, derivation, code challenge, or homework question** across all subjects:\n\n"
+            "- ⚛️ **Physics & Engineering** — Quantum Mechanics, Electromagnetism, Classical Mechanics, Thermodynamics\n"
+            "- 📐 **Mathematics** — Multivariable Calculus, Linear Algebra, Probability, Differential Equations\n"
+            "- 💻 **Computer Science & AI** — Data Structures, Algorithms, Machine Learning, Deep Neural Networks\n"
+            "- 🧪 **Chemistry** — Organic Synthesis, Reaction Mechanisms, Molecular Orbital Theory, Kinetics\n"
+            "- 🧬 **Biology & Genetics** — Cellular Respiration, Molecular Genetics, CRISPR, Evolution\n\n"
+            "💡 *Click a quick button above or type your question below!*"
         )
 
-# ── Render existing conversation ──────────────────────────────────────────────
+# ── Render Chat History ───────────────────────────────────────────────────────
 for msg in st.session_state.messages:
     avatar = "🧑‍🎓" if msg["role"] == "user" else "🎓"
     with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
 
-# ── Handle pending quick-start prompt ────────────────────────────────────────
+# ── Handle Pending Prompt ─────────────────────────────────────────────────────
 if st.session_state.pending_prompt:
-    user_text = st.session_state.pending_prompt
+    prompt_text = st.session_state.pending_prompt
     st.session_state.pending_prompt = None
-    # Append and immediately get response
-    st.session_state.messages.append({"role": "user", "content": user_text})
+    st.session_state.messages.append({"role": "user", "content": prompt_text})
+
     with st.chat_message("user", avatar="🧑‍🎓"):
-        st.markdown(user_text)
+        st.markdown(prompt_text)
 
     with st.chat_message("assistant", avatar="🎓"):
-        with st.spinner("Thinking…"):
-            reply = get_ai_response(user_text, mode, provider, api_key)
+        with st.spinner("Analyzing and preparing comprehensive solution…"):
+            reply = get_ai_response(prompt_text, mode, provider, api_key)
         st.markdown(reply)
 
     st.session_state.messages.append({"role": "assistant", "content": reply})
     st.rerun()
 
-# ── Chat input (always rendered at bottom) ────────────────────────────────────
-if user_input := st.chat_input("Ask me anything about your studies…"):
-    # Show user bubble immediately
+# ── User Input Box ────────────────────────────────────────────────────────────
+if user_input := st.chat_input("Ask any doubt, concept explanation, math derivation, or problem…"):
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user", avatar="🧑‍🎓"):
         st.markdown(user_input)
 
-    # Get and stream assistant reply
     with st.chat_message("assistant", avatar="🎓"):
-        with st.spinner("Thinking…"):
+        with st.spinner("Analyzing and preparing comprehensive solution…"):
             reply = get_ai_response(user_input, mode, provider, api_key)
         st.markdown(reply)
 
     st.session_state.messages.append({"role": "assistant", "content": reply})
 
-    # Auto-update memory: naive topic detection from conversation
+    # Automatic topic tracking
     low = user_input.lower()
-    if any(w in low for w in ["photosynthesis", "light reaction", "calvin", "chlorophyll"]):
-        record_progress(st.session_state.memory, "photosynthesis", score=0.75,
-                        note="Discussed in chat session.")
-    elif any(w in low for w in ["mitochondria", "atp", "respiration", "krebs", "glycolysis"]):
-        record_progress(st.session_state.memory, "mitochondria", score=0.75,
-                        note="Discussed in chat session.")
-    # Save to disk too
-    try:
-        from study_agent.memory import save_memory
-        save_memory(st.session_state.memory, DEFAULT_MEMORY_FILE)
-    except Exception:
-        pass
+    subject_map = {
+        "physics": ["physics", "quantum", "newton", "maxwell", "force", "velocity", "relativity", "photoelectric"],
+        "mathematics": ["math", "calculus", "derivative", "integral", "matrix", "eigen", "bayes", "taylor"],
+        "computer_science": ["algorithm", "data structure", "big-o", "dijkstra", "dynamic programming", "python", "neural"],
+        "chemistry": ["chemistry", "organic", "bond", "sn1", "sn2", "equilibrium", "gibbs"],
+        "biology": ["biology", "photosynthesis", "mitochondria", "dna", "genetics", "respiration"],
+    }
+    for subj_name, keywords in subject_map.items():
+        if any(k in low for k in keywords):
+            record_progress(
+                st.session_state.memory,
+                subj_name,
+                score=0.85,
+                note=f"Mastered core concepts in {subj_name.replace('_', ' ').capitalize()}.",
+            )
+            try:
+                from study_agent.memory import save_memory
+
+                save_memory(st.session_state.memory, DEFAULT_MEMORY_FILE)
+            except Exception:
+                pass
+            break
