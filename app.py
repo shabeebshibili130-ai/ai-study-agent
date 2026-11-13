@@ -234,16 +234,18 @@ def _mock_response(user_message: str) -> str:
 
 
 def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | None) -> str:
-    """Route the user message to the right backend and return the reply."""
+    """Route the user message to the right backend; auto-fallback to mock on any failure."""
     if mode == "Mock Mode (Free, Instant)":
         return _mock_response(user_message)
 
+    # No key → friendly message + mock fallback
     if not api_key or not api_key.strip():
-        return (
-            "❌ **No API key provided.**\n\n"
-            "Please paste your API key in the sidebar, or switch to **Mock Mode** to try "
-            "the agent for free without any key."
+        st.warning(
+            "⚠️ No API key found — using Mock Mode. "
+            "Add your Gemini key in the sidebar to get real AI responses.",
+            icon="🔑",
         )
+        return _mock_response(user_message)
 
     # Build the full conversation for the API call
     messages = [
@@ -253,14 +255,41 @@ def get_ai_response(user_message: str, mode: str, provider: str, api_key: str | 
 
     try:
         if provider == "openai":
-            return _call_openai(messages, api_key.strip())
+            reply = _call_openai(messages, api_key.strip())
         else:  # "gemini" or "auto"
-            return _call_gemini(messages, api_key.strip())
+            reply = _call_gemini(messages, api_key.strip())
+
+        # Detect error strings returned by the backends and fall back gracefully
+        if reply.startswith("❌"):
+            raise RuntimeError(reply)
+        return reply
+
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        return f"❌ **API error {e.code}:** {body[:300]}"
+        # API_KEY_INVALID or quota issues → show a helpful banner and use mock
+        if e.code in (400, 401, 403):
+            st.error(
+                f"**API key error ({e.code}):** The key you entered is not valid or has no access to Gemini.\n\n"
+                "👉 Get a free valid key → [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)\n\n"
+                "Falling back to **Mock Mode** for now.",
+                icon="🔑",
+            )
+        else:
+            st.error(f"**API error {e.code}** — falling back to Mock Mode.", icon="⚠️")
+        return _mock_response(user_message)
+
     except Exception as e:
-        return f"❌ **Unexpected error:** {str(e)}"
+        err = str(e)
+        if "API_KEY_INVALID" in err or "api key" in err.lower():
+            st.error(
+                "**Invalid API key.** The key you entered was rejected by Google.\n\n"
+                "👉 [Get a free valid Gemini key](https://aistudio.google.com/app/apikey) · "
+                "Falling back to **Mock Mode**.",
+                icon="🔑",
+            )
+        else:
+            st.error(f"**Unexpected error** — falling back to Mock Mode.\n\n`{err[:200]}`", icon="⚠️")
+        return _mock_response(user_message)
 
 
 # ── Session-state bootstrap ───────────────────────────────────────────────────
@@ -289,8 +318,8 @@ with st.sidebar:
 
     mode = st.radio(
         "LLM Engine:",
-        ["Live LLM (Gemini / OpenAI)", "Mock Mode (Free, Instant)"],
-        index=0 if _has_secret else 1,
+        ["Mock Mode (Free, Instant)", "Live LLM (Gemini / OpenAI)"],
+        index=0 if not _has_secret else 1,
     )
 
     api_key: str | None = None
