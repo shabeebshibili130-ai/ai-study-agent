@@ -70,6 +70,7 @@ Response Formatting Rules:
 
 
 # ── Note Loading Helper ───────────────────────────────────────────────────────
+@st.cache_data(ttl=3600)
 def _load_all_notes() -> str:
     notes_dir = Path("notes")
     if not notes_dir.exists():
@@ -102,18 +103,16 @@ _DEFAULT_GEMINI_KEY = "".join([
 
 # ── LLM Backends ──────────────────────────────────────────────────────────────
 def _get_active_gemini_model(api_key: str) -> str:
-    """Discovers which Gemini model is active and supported for the provided API key."""
+    """Discovers which ultra-fast Gemini model is active and supported."""
     if st.session_state.get("active_gemini_model"):
         return st.session_state.active_gemini_model
 
-    # Priority list of current models that support generateContent
+    # Priority list of ultra-fast models with sub-second response times
     priority_models = [
-        "gemini-3.5-flash",
         "gemini-3.5-flash-lite",
-        "gemini-3.6-flash",
-        "gemini-flash-latest",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
     ]
 
     # Try HTTP list_models first to match exact supported models
@@ -121,7 +120,7 @@ def _get_active_gemini_model(api_key: str) -> str:
         try:
             url = f"https://generativelanguage.googleapis.com/{ver}/models?key={api_key}"
             req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=4) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             available = [
                 m["name"].replace("models/", "")
@@ -138,8 +137,8 @@ def _get_active_gemini_model(api_key: str) -> str:
         except Exception:
             pass
 
-    st.session_state.active_gemini_model = "gemini-3.5-flash"
-    return "gemini-3.5-flash"
+    st.session_state.active_gemini_model = "gemini-3.5-flash-lite"
+    return "gemini-3.5-flash-lite"
 
 
 def _gemini_sdk(messages: list[dict], api_key: str, model: str) -> str:
@@ -147,7 +146,7 @@ def _gemini_sdk(messages: list[dict], api_key: str, model: str) -> str:
     import google.generativeai as genai  # type: ignore
 
     genai.configure(api_key=api_key)
-    candidates = [model, "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]
+    candidates = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite-preview", "gemini-3.1-flash-lite", model, "gemini-3.5-flash"]
     seen = set()
     ordered = [c for c in candidates if not (c in seen or seen.add(c))]
 
@@ -180,8 +179,8 @@ def _gemini_sdk(messages: list[dict], api_key: str, model: str) -> str:
 
 
 def _gemini_http(messages: list[dict], api_key: str, model: str) -> str:
-    """Call Gemini via raw HTTP with multi-version and multi-model fallback."""
-    candidates = [model, "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]
+    """Call Gemini via raw HTTP with ultra-fast models and low timeout."""
+    candidates = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite-preview", "gemini-3.1-flash-lite", model, "gemini-3.5-flash"]
     seen = set()
     ordered = [c for c in candidates if not (c in seen or seen.add(c))]
 
@@ -210,7 +209,7 @@ def _gemini_http(messages: list[dict], api_key: str, model: str) -> str:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=6) as resp:
                     body = json.loads(resp.read().decode("utf-8"))
                 candidates_out = body.get("candidates", [])
                 if candidates_out:

@@ -77,7 +77,7 @@ class RealLLM(BaseLLM):
         api_key: Optional[str] = None,
         provider: str = "auto",
         model: Optional[str] = None,
-        timeout: int = 30,
+        timeout: int = 10,
     ):
         self.gemini_key = api_key or os.getenv("GEMINI_API_KEY")
         self.openai_key = api_key or os.getenv("OPENAI_API_KEY")
@@ -86,7 +86,7 @@ class RealLLM(BaseLLM):
         if provider == "auto":
             if self.gemini_key:
                 self.provider = "gemini"
-                self.model = model or "gemini-2.0-flash"
+                self.model = model or "gemini-3.5-flash-lite"
                 self.api_key = self.gemini_key
             elif self.openai_key:
                 self.provider = "openai"
@@ -100,7 +100,7 @@ class RealLLM(BaseLLM):
             if not self.gemini_key:
                 raise ValueError("GEMINI_API_KEY not found in environment.")
             self.provider = "gemini"
-            self.model = model or "gemini-2.0-flash"
+            self.model = model or "gemini-3.5-flash-lite"
             self.api_key = self.gemini_key
         elif provider == "openai":
             if not self.openai_key:
